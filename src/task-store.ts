@@ -1,15 +1,9 @@
 import { RedisClientType } from 'redis';
 import { v4 as uuidv4 } from 'uuid';
 import { getCurrentTimestamp, getParsedTimestamp } from './utils.js';
+import { Task } from './types/task.js';
 
-export interface Task {
-    id: string;
-    user_id: string;
-    description: string;
-    status: string;
-    due_time: string;
-    created_at: string;
-}
+
 
 export class RedisTaskStore {
     private redis: RedisClientType;
