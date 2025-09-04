@@ -1,33 +1,33 @@
 import { RedisClientType } from 'redis';
 import { v4 as uuidv4 } from 'uuid';
-import { getCurrentTimestamp, getParsedTimestamp } from './utils.js';
+import { getCurrentTimestamp, getParsedTimestamp } from '../lib/utils.js';
+import { Task } from '../types/task.js';
+import TaskQueue from './task-queue.js';
 
-export interface Task {
-    id: string;
-    user_id: string;
-    description: string;
-    status: string;
-    due_time: string;
-    created_at: string;
-}
 
 export class RedisTaskStore {
     private redis: RedisClientType;
+    private taskQueue: TaskQueue | null = null;
 
     constructor(redisClient: RedisClientType) {
         this.redis = redisClient;
     }
 
-    private taskKey(taskId: string): string {
-        return `task:${taskId}`;
+    setTaskQueue(taskQueue: TaskQueue) {
+        this.taskQueue = taskQueue;
     }
 
-    private statusKey(userId: string, status: string): string {
-        return `tasks:${userId}:status:${status}`;
+
+    private taskKey(task_id: string): string {
+        return `task:${task_id}`;
     }
 
-    private dueKey(userId: string): string {
-        return `tasks:${userId}:due`;
+    private statusKey(user_id: string, status: string): string {
+        return `tasks:${user_id}:status:${status}`;
+    }
+
+    private dueKey(user_id: string): string {
+        return `tasks:${user_id}:due`;
     }
 
     async createTask({
@@ -41,13 +41,13 @@ export class RedisTaskStore {
         status: string,
         due_time?: string
     }): Promise<string> {
-        const taskId = uuidv4();
-        const taskKey = this.taskKey(taskId);
+        const task_id = uuidv4();
+        const taskKey = this.taskKey(task_id);
 
         const parsedTimestamp = due_time ? getParsedTimestamp(due_time!) : "";
 
         const taskData = {
-            id: taskId,
+            id: task_id,
             user_id,
             description,
             status,
@@ -56,32 +56,40 @@ export class RedisTaskStore {
         };
 
         await this.redis.hSet(taskKey, taskData);
-        await this.redis.sAdd(this.statusKey(user_id, status), taskId);
+        await this.redis.sAdd(this.statusKey(user_id, status), task_id);
 
         if (due_time && due_time?.length > 0 && typeof parsedTimestamp === "number") {
             await this.redis.zAdd(this.dueKey(user_id), {
-                value: taskId,
+                value: task_id,
                 score: parsedTimestamp,
             });
+
+            // Schedule reminder if task is pending
+            if (status === 'pending' && this.taskQueue) {
+                const task = await this.getTask(task_id);
+                if (task) {
+                    await this.taskQueue.scheduleTaskReminder(task);
+                }
+            }
         }
 
-        return taskId;
+        return task_id;
     }
 
-    async createTasksBulk(userId: string, tasks: any[]): Promise<string[]> {
+    async createTasksBulk(user_id: string, tasks: any[]): Promise<string[]> {
         const taskIds: string[] = [];
         const now = getCurrentTimestamp();
 
         for (const task of tasks) {
-            const taskId = uuidv4();
-            taskIds.push(taskId);
+            const task_id = uuidv4();
+            taskIds.push(task_id);
 
             const due_time = task.due_time ? getParsedTimestamp(task.due_time) : undefined;
-            const taskKey = this.taskKey(taskId);
+            const taskKey = this.taskKey(task_id);
 
             const taskData = {
-                id: taskId,
-                user_id: userId,
+                id: task_id,
+                user_id: user_id,
                 description: task.description,
                 status: task.status || "pending",
                 due_time: due_time ? due_time.toString() : "",
@@ -89,21 +97,27 @@ export class RedisTaskStore {
             };
 
             await this.redis.hSet(taskKey, taskData);
-            await this.redis.sAdd(this.statusKey(userId, task.status || "pending"), taskId);
+            await this.redis.sAdd(this.statusKey(user_id, task.status || "pending"), task_id);
 
             if (due_time) {
-                await this.redis.zAdd(this.dueKey(userId), {
-                    value: taskId,
+                await this.redis.zAdd(this.dueKey(user_id), {
+                    value: task_id,
                     score: due_time,
                 });
+
+                // Schedule reminder if task is pending
+                const task = await this.getTask(task_id);
+                if (task && this.taskQueue) {
+                    await this.taskQueue.scheduleTaskReminder(task);
+                }
             }
         }
 
         return taskIds;
     }
 
-    async getTask(taskId: string): Promise<Task | null> {
-        const taskKey = this.taskKey(taskId);
+    async getTask(task_id: string): Promise<Task | null> {
+        const taskKey = this.taskKey(task_id);
         const task = await this.redis.hGetAll(taskKey);
 
         if (!task || Object.keys(task).length === 0) return null;
@@ -113,12 +127,12 @@ export class RedisTaskStore {
             due_time: task.due_time && task.due_time !== ""
                 ? new Date(parseInt(task.due_time)).toISOString()
                 : "",
-            created_at : new Date(parseInt(task.created_at)).toISOString()
+            created_at: new Date(parseInt(task.created_at)).toISOString()
         } as Task;
     }
 
-    async updateTask(userId: string, taskId: string, updates: any): Promise<boolean> {
-        const taskKey = this.taskKey(taskId);
+    async updateTask(user_id: string, task_id: string, updates: any): Promise<boolean> {
+        const taskKey = this.taskKey(task_id);
         const task = await this.redis.hGetAll(taskKey);
 
         if (!task || Object.keys(task).length === 0) return false;
@@ -146,44 +160,61 @@ export class RedisTaskStore {
 
         if (updates.status && updates.status !== oldStatus) {
             if (oldStatus) {
-                await this.redis.sRem(this.statusKey(userId, oldStatus), taskId);
+                await this.redis.sRem(this.statusKey(user_id, oldStatus), task_id);
             }
-            await this.redis.sAdd(this.statusKey(userId, updates.status), taskId);
+            await this.redis.sAdd(this.statusKey(user_id, updates.status), task_id);
         }
 
         if (updates.due_time !== undefined) {
             if (oldDueTime) {
-                await this.redis.zRem(this.dueKey(userId), taskId);
+                await this.redis.zRem(this.dueKey(user_id), task_id);
             }
             if (newDueTime) {
-                await this.redis.zAdd(this.dueKey(userId), {
-                    value: taskId,
+                await this.redis.zAdd(this.dueKey(user_id), {
+                    value: task_id,
                     score: newDueTime,
                 });
             }
         }
 
+        // Reschedule reminder if due time changed or status changed to pending
+        if (updates.due_time !== undefined || (updates.status && updates.status === 'pending')) {
+            const updatedTask = await this.getTask(task_id);
+            if (updatedTask && this.taskQueue) {
+                await this.taskQueue.rescheduleTaskReminder(updatedTask);
+            }
+        } else if (updates.status && updates.status !== 'pending' && this.taskQueue) {
+            // Remove scheduled reminder if task is no longer pending
+            await this.taskQueue.removeScheduledReminder(task_id);
+        }
+
         return true;
     }
 
-    async deleteTask(userId: string, taskId: string): Promise<boolean> {
-        const task = await this.getTask(taskId);
+    async deleteTask(user_id: string, task_id: string): Promise<boolean> {
+        const task = await this.getTask(task_id);
         if (!task) return false;
 
         if (task.status) {
-            await this.redis.sRem(this.statusKey(userId, task.status), taskId);
+            await this.redis.sRem(this.statusKey(user_id, task.status), task_id);
         }
 
         if (task.due_time && task.due_time !== "") {
-            await this.redis.zRem(this.dueKey(userId), taskId);
+            await this.redis.zRem(this.dueKey(user_id), task_id);
         }
 
-        await this.redis.del(this.taskKey(taskId));
+        // Remove any scheduled reminder
+        if(this.taskQueue) {
+            await this.taskQueue.removeScheduledReminder(task_id);
+        }
+
+
+        await this.redis.del(this.taskKey(task_id));
         return true;
     }
 
     async getTasksByFilters(
-        userId: string,
+        user_id: string,
         statuses: string[] = ["pending", "completed"],
         start?: string,
         end?: string
@@ -192,7 +223,7 @@ export class RedisTaskStore {
 
         if (statuses.length > 0) {
             for (const status of statuses) {
-                const statusTaskIds = await this.redis.sMembers(this.statusKey(userId, status));
+                const statusTaskIds = await this.redis.sMembers(this.statusKey(user_id, status));
                 taskIds = [...taskIds, ...statusTaskIds];
             }
         }
@@ -200,7 +231,7 @@ export class RedisTaskStore {
         if (start !== undefined || end !== undefined) {
             const min = start !== undefined ? getParsedTimestamp(start) : "-inf";
             const max = end !== undefined ? getParsedTimestamp(end) : "+inf";
-            const dueTaskIds = await this.redis.zRangeByScore(this.dueKey(userId), min, max);
+            const dueTaskIds = await this.redis.zRangeByScore(this.dueKey(user_id), min, max);
 
             if (taskIds.length > 0) {
                 taskIds = taskIds.filter(id => dueTaskIds.includes(id));
@@ -210,8 +241,8 @@ export class RedisTaskStore {
         }
 
         const tasks: Task[] = [];
-        for (const taskId of taskIds) {
-            const task = await this.getTask(taskId);
+        for (const task_id of taskIds) {
+            const task = await this.getTask(task_id);
             if (task) tasks.push(task);
         }
 

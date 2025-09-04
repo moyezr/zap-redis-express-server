@@ -1,1 +1,1 @@
-{"root":["./src/index.ts","./src/redis-client.ts","./src/task-store.ts","./src/utils.ts"],"version":"5.9.2"}
+{"root":["./src/index.ts","./src/controllers/task-controller.ts","./src/controllers/user-controllers.ts","./src/db/prisma-client.ts","./src/db/redis-client.ts","./src/lib/utils.ts","./src/routes/task-routes.ts","./src/routes/user-routes.ts","./src/services/notification-service.ts","./src/services/task-queue.ts","./src/services/task-store.ts","./src/types/task.ts"],"version":"5.9.2"}
