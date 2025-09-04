@@ -1,0 +1,1 @@
+{"version":3,"file":"redis-client.d.ts","sourceRoot":"","sources":["../src/redis-client.ts"],"names":[],"mappings":"AAAA,OAAO,EAAgB,eAAe,EAAE,MAAM,OAAO,CAAC;AAItD,eAAO,MAAM,cAAc,QAAa,OAAO,CAAC,eAAe,CAc9D,CAAC"}
